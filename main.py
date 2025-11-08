@@ -1,20 +1,36 @@
 import os
 import asyncio
 import re
+import sqlite3
+import json
 from datetime import datetime
 from typing import List, Dict, Any
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
-from supabase import create_client, Client
 import random
 
 # === КОНФИГ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 OPENROUTER_API_KEY = "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"
 
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
+DB_FILE = "users.db"
+
+# === ИНИТ БД ===
+def init_db():
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        CREATE TABLE IF NOT EXISTS user_chats (
+            user_id INTEGER PRIMARY KEY,
+            history TEXT,
+            annoyance INTEGER,
+            detailed_mode INTEGER
+        )
+    ''')
+    conn.commit()
+    conn.close()
+
+init_db()
 
 # === ПРОМПТЫ ===
 SYSTEM_PROMPT = """Ты — дерзкий зуммер-бот. Коротко, остро, с сарказмом и лёгким подколом.
@@ -67,32 +83,31 @@ ANNOYANCE_RESPONSES = [
     "no cap, ты самый надоедливый"
 ]
 
-# === SUPABASE ===
-async def get_user_data(user_id: int) -> Dict[str, Any]:
-    result = supabase.table("user_chats").select("*").eq("user_id", user_id).execute()
-    if result.data:
-        data = result.data[0]
+# === БД ===
+def get_user_data(user_id: int) -> Dict[str, Any]:
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute("SELECT history, annoyance, detailed_mode FROM user_chats WHERE user_id = ?", (user_id,))
+    row = c.fetchone()
+    if row:
+        history = json.loads(row[0]) if row[0] else [{"role": "system", "content": SYSTEM_PROMPT}]
         return {
-            "history": data["history"],
-            "annoyance": data["annoyance"],
-            "detailed_mode": data["detailed_mode"]
+            "history": history,
+            "annoyance": row[1] or 0,
+            "detailed_mode": bool(row[2])
         }
-    default_history = [{"role": "system", "content": SYSTEM_PROMPT}]
-    supabase.table("user_chats").insert({
-        "user_id": user_id,
-        "history": default_history,
-        "annoyance": 0,
-        "detailed_mode": False
-    }).execute()
-    return {"history": default_history, "annoyance": 0, "detailed_mode": False}
+    conn.close()
+    return {"history": [{"role": "system", "content": SYSTEM_PROMPT}], "annoyance": 0, "detailed_mode": False}
 
-async def save_user_data(user_id: int, history: List[Dict], annoyance: int, detailed_mode: bool):
-    supabase.table("user_chats").update({
-        "history": history,
-        "annoyance": annoyance,
-        "detailed_mode": detailed_mode,
-        "updated_at": datetime.utcnow().isoformat()
-    }).eq("user_id", user_id).execute()
+def save_user_data(user_id: int, history: List[Dict], annoyance: int, detailed_mode: bool):
+    conn = sqlite3.connect(DB_FILE)
+    c = conn.cursor()
+    c.execute('''
+        INSERT OR REPLACE INTO user_chats (user_id, history, annoyance, detailed_mode)
+        VALUES (?, ?, ?, ?)
+    ''', (user_id, json.dumps(history), annoyance, int(detailed_mode)))
+    conn.commit()
+    conn.close()
 
 # === OPENROUTER ===
 async def call_openrouter(messages: List[Dict]) -> str:
@@ -157,27 +172,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 goated как никто 🔥"""
     user_id = update.effective_user.id
-    await save_user_data(user_id, [{"role": "system", "content": SYSTEM_PROMPT}], 0, False)
+    save_user_data(user_id, [{"role": "system", "content": SYSTEM_PROMPT}], 0, False)
     await update.message.reply_text(welcome_text)
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_message = update.message.text.lower().strip()
     
-    data = await get_user_data(user_id)
+    data = get_user_data(user_id)
     history = data["history"]
     annoyance = data["annoyance"]
     detailed_mode = data["detailed_mode"]
     
     if any(phrase in user_message for phrase in ['подробнее', 'распиши', 'подробно', 'детальнее', 'объясни']):
         detailed_mode = True
-        await save_user_data(user_id, history, annoyance, detailed_mode)
+        save_user_data(user_id, history, annoyance, detailed_mode)
         await update.message.reply_text("окей, буду расписывать подробнее... на некоторое время 💀")
         return
     
     if any(phrase in user_message for phrase in ['короче', 'сократи', 'обычно', 'кратко']):
         detailed_mode = False
-        await save_user_data(user_id, history, annoyance, detailed_mode)
+        save_user_data(user_id, history, annoyance, detailed_mode)
         await update.message.reply_text("say less, возвращаюсь к коротким 🔥")
         return
     
@@ -185,7 +200,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if annoyance > 8 and random.random() > 0.4:
         await update.message.reply_text(random.choice(ANNOYANCE_RESPONSES))
         annoyance = 0
-        await save_user_data(user_id, history, annoyance, detailed_mode)
+        save_user_data(user_id, history, annoyance, detailed_mode)
         return
     
     history.append({"role": "user", "content": update.message.text})
@@ -209,7 +224,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if detailed_mode and detailed_count >= 2:
         detailed_mode = False
     
-    await save_user_data(user_id, history, annoyance, detailed_mode)
+    save_user_data(user_id, history, annoyance, detailed_mode)
     await update.message.reply_text(ai_response)
 
 # === ЗАПУСК ===
@@ -222,7 +237,6 @@ async def main():
     await app.start()
     await app.updater.start_polling()
     print("Polling запущен...")
-    # Держим процесс живым
     while True:
         await asyncio.sleep(3600)
 
