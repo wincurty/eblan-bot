@@ -1,17 +1,14 @@
 import os
-import json
 import asyncio
 import re
 from datetime import datetime
 from typing import List, Dict, Any
-from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse
-import uvicorn
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 from supabase import create_client, Client
 import random
 
+# === КОНФИГ ===
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 SUPABASE_URL = os.getenv("SUPABASE_URL")
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
@@ -19,6 +16,7 @@ OPENROUTER_API_KEY = "sk-or-v1-1670ac5ea31653a16bd4946a46b501dbbb4a9aef27dfb6041
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
+# === ПРОМПТЫ ===
 SYSTEM_PROMPT = """Ты — дерзкий зуммер-бот. Коротко, остро, с сарказмом и лёгким подколом.
 
 - Пиши 1–3 короткие строки. Никаких простыней.
@@ -69,6 +67,7 @@ ANNOYANCE_RESPONSES = [
     "no cap, ты самый надоедливый"
 ]
 
+# === SUPABASE ===
 async def get_user_data(user_id: int) -> Dict[str, Any]:
     result = supabase.table("user_chats").select("*").eq("user_id", user_id).execute()
     if result.data:
@@ -95,6 +94,7 @@ async def save_user_data(user_id: int, history: List[Dict], annoyance: int, deta
         "updated_at": datetime.utcnow().isoformat()
     }).eq("user_id", user_id).execute()
 
+# === OPENROUTER ===
 async def call_openrouter(messages: List[Dict]) -> str:
     import aiohttp
     import ssl
@@ -139,6 +139,7 @@ async def call_openrouter(messages: List[Dict]) -> str:
             else:
                 return f"ошибка 💀 ({response.status})"
 
+# === ХЕНДЛЕРЫ ===
 async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     welcome_text = """привет, чел 👋 
 я твой дерзкий AI-кореш с риззом и сарказмом
@@ -211,23 +212,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await save_user_data(user_id, history, annoyance, detailed_mode)
     await update.message.reply_text(ai_response)
 
-app = FastAPI()
-application = Application.builder().token(TELEGRAM_TOKEN).build()
-application.add_handler(CommandHandler("start", start_command))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-
-@app.post("/webhook")
-async def webhook(request: Request):
-    try:
-        update_json = await request.json()
-        update = Update.de_json(update_json, application.bot)
-        if update:
-            await application.process_update(update)
-        return JSONResponse({"ok": True})
-    except Exception as e:
-        print(f"Webhook error: {e}")
-        return JSONResponse({"ok": False, "error": str(e)})
+# === ЗАПУСК ===
+async def main():
+    print("Бот-зуммер запущен: коротко, дерзко, goated 🔥")
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app.add_handler(CommandHandler("start", start_command))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling()
+    print("Polling запущен...")
+    # Держим процесс живым
+    while True:
+        await asyncio.sleep(3600)
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 8000))
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    asyncio.run(main())
